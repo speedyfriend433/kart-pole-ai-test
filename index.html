@@ -199,30 +199,29 @@ function chooseAction(state) {
        ******************************************************/
       // First, create your Actor and Critic networks.
 // You may adjust the architecture as needed.
-let actorModel, criticModel, optimizer;
-const numActions = 2; // For left (-1) and right (+1)
-const stateDim = simulationType === "1-pole" ? 4 : 6; // adapt to your state definition
+let actorModel, criticModel, optimizer;  // global declaration
 
 function setupActorCriticModels() {
   // Dispose previous models, if any.
   if (actorModel) actorModel.dispose();
   if (criticModel) criticModel.dispose();
 
-  // Actor: a simple feedforward network that outputs action probabilities.
+  // Create (or recreate) the actor network.
   actorModel = tf.sequential();
   actorModel.add(tf.layers.dense({ inputShape: [stateDim], units: 24, activation: 'relu' }));
   actorModel.add(tf.layers.dense({ units: 24, activation: 'relu' }));
   actorModel.add(tf.layers.dense({ units: numActions, activation: 'softmax' }));
   
-  // Critic: similar structure but output a single scalar (Value estimate).
+  // Create the critic network.
   criticModel = tf.sequential();
   criticModel.add(tf.layers.dense({ inputShape: [stateDim], units: 24, activation: 'relu' }));
   criticModel.add(tf.layers.dense({ units: 24, activation: 'relu' }));
   criticModel.add(tf.layers.dense({ units: 1, activation: 'linear' }));
-
-  // Single optimizer to train both networks (together they have all trainable weights).
+  
+  // Instead of letting optimizer be declared again, we reassign it.
   optimizer = tf.train.adam(0.01);
 }
+
 
 // Call this function at initialization or if you change simulation type.
 setupActorCriticModels();
