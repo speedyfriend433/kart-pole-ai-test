@@ -2,57 +2,96 @@
 <html>
   <head>
     <meta charset="UTF-8">
-    <title>Cart-Pole AI Balancer using WebGL</title>
-    <!-- TensorFlow.js from CDN -->
+    <title>Enhanced Cart-Pole AI Balancer with WebGL</title>
+    <!-- TensorFlow.js CDN -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
     <style>
+      /* Basic style for full-window canvas and control panel overlay */
       body, html {
         margin: 0;
         padding: 0;
         overflow: hidden;
+        font-family: sans-serif;
       }
       canvas {
         display: block;
       }
+      #controlPanel {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: rgba(255,255,255,0.9);
+        padding: 10px;
+        border-radius: 5px;
+        z-index: 100;
+      }
+      #controlPanel label, #controlPanel button {
+        font-size: 13px;
+      }
+      #metrics {
+        margin-top: 10px;
+        font-size: 12px;
+      }
     </style>
   </head>
   <body>
+    <!-- Our canvas for WebGL rendering -->
     <canvas id="glcanvas" width="800" height="600"></canvas>
+    <!-- UI Control Panel -->
+    <div id="controlPanel">
+      <button id="toggleSim">Pause Simulation</button>
+      <button id="resetSim">Reset Simulation</button>
+      <button id="toggleRecord">Start Recording</button>
+      <br><br>
+      <label>Force Magnitude: <span id="forceDisplay">10.0</span></label><br>
+      <input type="range" id="forceSlider" min="1" max="20" step="0.5" value="10">
+      <br>
+      <label>Gravity: <span id="gravityDisplay">9.8</span></label><br>
+      <input type="range" id="gravitySlider" min="0" max="20" step="0.1" value="9.8">
+      <br>
+      <label>Simulation Speed: <span id="speedDisplay">1.0</span></label><br>
+      <input type="range" id="speedSlider" min="0.5" max="2" step="0.1" value="1.0">
+      
+      <div id="metrics"></div>
+    </div>
+    
     <script>
       /******************************************************
        * Simulation and Reinforcement Learning Setup
        ******************************************************/
-      // Physics parameters for the cart–pole system
-      const gravity = 9.8;
+      // Global physics parameters (adjustable via UI sliders)
+      let gravity = 9.8;
       const massCart = 1.0;
       const massPole = 0.1;
       const totalMass = massCart + massPole;
-      const poleLength = 0.5;  // half-length in meters
-      const forceMag = 10.0;
-      const tau = 0.02;      // simulation time step (seconds)
-
-      // State variables (x: cart position, theta: pole angle in radians)
+      let poleLength = 0.5;  // meters (half-length)
+      let forceMag = 10.0;
+      const baseTau = 0.02;  // base simulation time step (seconds)
+      let simulationSpeed = 1.0;  // simulation speed multiplier
+      
+      // State variables: cart position and velocity, pole angle and angular velocity
       let x = 0, x_dot = 0, theta = 0.05, theta_dot = 0;
-      const scaleFactor = 100;   // scale: meters to pixels
-      const offsetY = 100;       // vertical offset, in pixels
-
-      // For RL training data
+      const scaleFactor = 100;   // meters-to-pixels conversion factor
+      const offsetY = 100;       // vertical offset in pixels
+      
+      // Trajectory storage (for pole tip)
+      let trajectory = [];
+      
+      // Reinforcement learning data storage
       let states = [];
       let actions = [];
       let rewards = [];
-      let episodeReward = 0;
-      let episodeCount = 0;
-      // For storing the tip trajectory of the pole
-      let trajectory = [];
-
-      // Build a simple policy network with TensorFlow.js
+      let episodeReward = 0, episodeCount = 0;
+      
+      // Build a simple policy network using TensorFlow.js
       const model = tf.sequential();
       model.add(tf.layers.dense({ inputShape: [4], units: 24, activation: 'relu' }));
       model.add(tf.layers.dense({ units: 24, activation: 'relu' }));
+      // Two outputs: probability of moving left (-1) vs. right (+1)
       model.add(tf.layers.dense({ units: 2, activation: 'softmax' }));
       const optimizer = tf.train.adam(0.01);
-
-      // Given the current state, choose an action: -1 for left, +1 for right.
+      
+      // Given the current state, pick an action by sampling from the model's probabilities.
       function chooseAction(state) {
         return tf.tidy(() => {
           const logits = model.predict(tf.tensor2d([state]));
@@ -61,9 +100,9 @@
           return (rand < probs[0]) ? -1 : 1;
         });
       }
-
-      // Update simulation state using Euler integration.
-      function simulateStep(action) {
+      
+      // Update the simulation state (Euler integration) using a time step dt.
+      function simulateStep(action, dt) {
         const force = action * forceMag;
         const costheta = Math.cos(theta);
         const sintheta = Math.sin(theta);
@@ -71,15 +110,14 @@
         const theta_acc = (gravity * sintheta - costheta * temp) /
                           (poleLength * (4.0/3.0 - massPole * costheta * costheta / totalMass));
         const x_acc = temp - massPole * poleLength * theta_acc * costheta / totalMass;
-        x += tau * x_dot;
-        x_dot += tau * x_acc;
-        theta += tau * theta_dot;
-        theta_dot += tau * theta_acc;
+        x += dt * x_dot;
+        x_dot += dt * x_acc;
+        theta += dt * theta_dot;
+        theta_dot += dt * theta_acc;
       }
-
-      // Train the policy network using policy gradients.
+      
+      // Train the policy network using a policy gradient method.
       function trainModel() {
-        // Compute discounted rewards
         const discountedRewards = [];
         let sum = 0;
         const gamma = 0.99;
@@ -87,15 +125,12 @@
           sum = rewards[i] + gamma * sum;
           discountedRewards[i] = sum;
         }
-        
         const statesTensor = tf.tensor2d(states);
         const actionsTensor = tf.tensor1d(actions, 'int32');
         const rewardsTensor = tf.tensor1d(discountedRewards);
-        
         optimizer.minimize(() => {
           const logits = model.predict(statesTensor);
-          const actionOHE = tf.oneHot(actionsTensor, 2);  // one-hot: 0 for left, 1 for right
-          // Manually compute a per-example softmax cross-entropy loss:
+          const actionOHE = tf.oneHot(actionsTensor, 2);
           const epsilon = 1e-7;
           const softmax = tf.softmax(logits);
           const clipped = tf.clipByValue(softmax, epsilon, 1 - epsilon);
@@ -104,27 +139,25 @@
           const loss = tf.mean(tf.mul(perExampleLoss, rewardsTensor));
           return loss;
         });
-        
         statesTensor.dispose();
         actionsTensor.dispose();
         rewardsTensor.dispose();
       }
-
+      
       /******************************************************
        * WebGL Rendering Setup and Functions
        ******************************************************/
       let canvas, gl, program, positionBuffer;
       let resolutionUniformLocation, colorUniformLocation, positionAttribLocation;
-
-      // Initialize WebGL context, compile shaders, and set uniforms.
+      
+      // Initialize WebGL, compile shaders, and set uniforms.
       function initGL() {
-        canvas = document.getElementById('glcanvas');
-        gl = canvas.getContext('webgl');
+        canvas = document.getElementById("glcanvas");
+        gl = canvas.getContext("webgl");
         if (!gl) {
           alert("WebGL not supported");
           return;
         }
-        
         // Vertex shader: converts pixel positions to clip space.
         const vsSource = `
           attribute vec2 a_position;
@@ -136,7 +169,7 @@
             gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
           }
         `;
-        // Fragment shader: outputs a uniform color.
+        // Fragment shader: outputs a solid color.
         const fsSource = `
           precision mediump float;
           uniform vec4 u_color;
@@ -147,17 +180,13 @@
         const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
         const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
         program = createProgram(gl, vertexShader, fragmentShader);
-        
-        // Get attribute and uniform locations from the shader program.
         positionAttribLocation = gl.getAttribLocation(program, "a_position");
         resolutionUniformLocation = gl.getUniformLocation(program, "u_resolution");
         colorUniformLocation = gl.getUniformLocation(program, "u_color");
-
-        // Create one buffer for all our drawing calls.
         positionBuffer = gl.createBuffer();
       }
-
-      // Helper function to compile a shader.
+      
+      // Compile a shader.
       function createShader(gl, type, source) {
         const shader = gl.createShader(type);
         gl.shaderSource(shader, source);
@@ -167,8 +196,8 @@
         console.log(gl.getShaderInfoLog(shader));
         gl.deleteShader(shader);
       }
-
-      // Link shaders into a program.
+      
+      // Link shaders into a WebGL program.
       function createProgram(gl, vertexShader, fragmentShader) {
         const program = gl.createProgram();
         gl.attachShader(program, vertexShader);
@@ -179,8 +208,8 @@
         console.log(gl.getProgramInfoLog(program));
         gl.deleteProgram(program);
       }
-
-      // Construct vertices for a rectangle (two triangles).
+      
+      // Build vertices for a rectangle (two triangles).
       function setRectangle(x, y, width, height) {
         const x1 = x, y1 = y;
         const x2 = x + width, y2 = y + height;
@@ -193,8 +222,8 @@
           x2, y2,
         ]);
       }
-
-      // Generic function to draw using provided vertices, color, and draw mode.
+      
+      // Generic function to draw a set of vertices.
       function drawShape(vertices, color, mode) {
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
@@ -203,55 +232,55 @@
         gl.uniform4f(colorUniformLocation, color[0], color[1], color[2], color[3]);
         gl.drawArrays(mode, 0, vertices.length / 2);
       }
-
-      // Convenience: draw a line (or a connected line strip) from an array of points.
+      
+      // Draw a line (or connected line strip) from an array of points.
       function drawLine(points, color, mode = gl.LINE_STRIP) {
         const vertices = new Float32Array(points);
         drawShape(vertices, color, mode);
       }
-
+      
       // Draw a filled rectangle.
       function drawRect(x, y, width, height, color) {
         const vertices = setRectangle(x, y, width, height);
         drawShape(vertices, color, gl.TRIANGLES);
       }
-
-      // Render our entire simulation scene.
-      function render() {
+      
+      // Render the cart-pole scene (ground, cart, pole, and tip trajectory).
+      function renderScene() {
         gl.viewport(0, 0, canvas.width, canvas.height);
         gl.clearColor(0.9, 0.9, 0.9, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
         gl.useProgram(program);
         gl.uniform2f(resolutionUniformLocation, canvas.width, canvas.height);
         
-        // Draw the ground as a horizontal line.
+        // Draw ground as a horizontal line.
         const groundY = canvas.height / 2 + offsetY;
         drawLine([0, groundY, canvas.width, groundY], [0.4, 0.4, 0.4, 1], gl.LINES);
         
-        // Compute cart (kernel) position in pixel coordinates.
+        // Compute cart position.
         const cartX = canvas.width / 2 + (x * scaleFactor);
         const cartY = canvas.height / 2 + offsetY;
-        // Draw the cart as a 50x20 rectangle (centered at (cartX, cartY)).
+        // Draw cart as a rectangle.
         drawRect(cartX - 25, cartY - 10, 50, 20, [0, 0, 0, 1]);
         
-        // Compute the pole’s tip position.
+        // Compute pole tip position.
         const L = poleLength * scaleFactor;
         const tipX = cartX + Math.sin(theta) * L;
         const tipY = cartY - Math.cos(theta) * L;
-        // Draw the pole as a red line.
+        // Draw the pole (a red line).
         drawLine([cartX, cartY, tipX, tipY], [1, 0, 0, 1], gl.LINES);
         
-        // Draw the trajectory of the pole’s tip as a blue line strip.
+        // Draw the tip's trajectory as a blue line strip.
         if (trajectory.length > 1) {
-          let trajPoints = [];
+          let trajPts = [];
           for (let pt of trajectory) {
-            trajPoints.push(pt.x, pt.y);
+            trajPts.push(pt.x, pt.y);
           }
-          drawLine(trajPoints, [0, 0, 1, 0.6], gl.LINE_STRIP);
+          drawLine(trajPts, [0, 0, 1, 0.6], gl.LINE_STRIP);
         }
       }
-
-      // Save the current pole tip position into the trajectory array.
+      
+      // Record the current tip position.
       function updateTrajectory() {
         const cartX = canvas.width / 2 + (x * scaleFactor);
         const cartY = canvas.height / 2 + offsetY;
@@ -259,58 +288,142 @@
         const tipX = cartX + Math.sin(theta) * L;
         const tipY = cartY - Math.cos(theta) * L;
         trajectory.push({ x: tipX, y: tipY });
-        // Limit the number of stored trajectory points.
         if (trajectory.length > 500) trajectory.shift();
       }
-
-      // Failure if the pole falls too far or the cart goes off-screen.
+      
+      // Return true if the pole falls too far or the cart is off-screen.
       function checkFailure() {
         return (Math.abs(theta) > Math.PI / 2 ||
                 Math.abs(x * scaleFactor) > canvas.width / 2);
       }
-
-      // Reset the simulation for a new episode.
+      
+      // Reset simulation state.
       function resetSimulation() {
-        x = 0;
-        x_dot = 0;
-        theta = 0.05;
-        theta_dot = 0;
+        x = 0; x_dot = 0; theta = 0.05; theta_dot = 0;
         trajectory = [];
       }
-
+      
+      /******************************************************
+       * UI and Recording Setup
+       ******************************************************/
+      let simRunning = true;
+      let mediaRecorder, recordedChunks = [];
+      let recording = false;
+      
+      const toggleSimBtn = document.getElementById("toggleSim");
+      const resetSimBtn = document.getElementById("resetSim");
+      const toggleRecordBtn = document.getElementById("toggleRecord");
+      const forceSlider = document.getElementById("forceSlider");
+      const forceDisplay = document.getElementById("forceDisplay");
+      const gravitySlider = document.getElementById("gravitySlider");
+      const gravityDisplay = document.getElementById("gravityDisplay");
+      const speedSlider = document.getElementById("speedSlider");
+      const speedDisplay = document.getElementById("speedDisplay");
+      const metricsDiv = document.getElementById("metrics");
+      
+      toggleSimBtn.addEventListener("click", () => {
+        simRunning = !simRunning;
+        toggleSimBtn.textContent = simRunning ? "Pause Simulation" : "Resume Simulation";
+      });
+      
+      resetSimBtn.addEventListener("click", () => {
+        resetSimulation();
+      });
+      
+      forceSlider.addEventListener("input", () => {
+        forceMag = parseFloat(forceSlider.value);
+        forceDisplay.textContent = forceMag.toFixed(1);
+      });
+      
+      gravitySlider.addEventListener("input", () => {
+        gravity = parseFloat(gravitySlider.value);
+        gravityDisplay.textContent = gravity.toFixed(1);
+      });
+      
+      speedSlider.addEventListener("input", () => {
+        simulationSpeed = parseFloat(speedSlider.value);
+        speedDisplay.textContent = simulationSpeed.toFixed(1);
+      });
+      
+      // Toggle recording using the MediaRecorder API.
+      toggleRecordBtn.addEventListener("click", () => {
+        if (!recording) {
+          startRecording();
+          toggleRecordBtn.textContent = "Stop Recording";
+        } else {
+          stopRecording();
+          toggleRecordBtn.textContent = "Start Recording";
+        }
+        recording = !recording;
+      });
+      
+      function startRecording() {
+        let stream = canvas.captureStream(30);  // 30 fps
+        mediaRecorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+        mediaRecorder.ondataavailable = e => {
+          if (e.data.size > 0) recordedChunks.push(e.data);
+        };
+        mediaRecorder.onstop = saveRecording;
+        mediaRecorder.start();
+      }
+      
+      function stopRecording() {
+        mediaRecorder.stop();
+      }
+      
+      function saveRecording() {
+        let blob = new Blob(recordedChunks, { type: "video/webm" });
+        recordedChunks = [];
+        let url = URL.createObjectURL(blob);
+        let a = document.createElement("a");
+        a.style.display = "none";
+        a.href = url;
+        a.download = "simulation.webm";
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+      }
+      
+      // Update metrics (episode count, reward and state information) on the overlay.
+      function updateMetrics() {
+        metricsDiv.innerHTML = `Episode: ${episodeCount}<br>
+          Episode Reward: ${episodeReward}<br>
+          x: ${x.toFixed(2)}, x_dot: ${x_dot.toFixed(2)}<br>
+          theta: ${theta.toFixed(2)}, theta_dot: ${theta_dot.toFixed(2)}`;
+      }
+      
       /******************************************************
        * Main Animation Loop
        ******************************************************/
       function step() {
-        // Get current state and choose an action using the policy network.
-        const currentState = [x, x_dot, theta, theta_dot];
-        const action = chooseAction(currentState);
-        simulateStep(action);
-        
-        // Record the simulation step for RL training.
-        states.push(currentState);
-        actions.push(action === -1 ? 0 : 1);  // store action as 0 (left) / 1 (right)
-        const reward = (Math.abs(theta) < Math.PI / 6) ? 1 : 0;
-        rewards.push(reward);
-        episodeReward += reward;
-        
-        updateTrajectory();
-        render();
-        
-        // Check if the episode is over (failure condition reached).
-        if (checkFailure()) {
-          episodeCount++;
-          console.log("Episode:", episodeCount, "Total reward:", episodeReward);
-          trainModel();
-          resetSimulation();
-          states = [];
-          actions = [];
-          rewards = [];
-          episodeReward = 0;
+        if (simRunning) {
+          const dt = baseTau * simulationSpeed;
+          const currentState = [x, x_dot, theta, theta_dot];
+          const action = chooseAction(currentState);
+          simulateStep(action, dt);
+          states.push(currentState);
+          actions.push(action === -1 ? 0 : 1);
+          const reward = (Math.abs(theta) < Math.PI / 6) ? 1 : 0;
+          rewards.push(reward);
+          episodeReward += reward;
+          updateTrajectory();
+          
+          if (checkFailure()) {
+            episodeCount++;
+            console.log("Episode:", episodeCount, "Total reward:", episodeReward);
+            trainModel();
+            resetSimulation();
+            states = [];
+            actions = [];
+            rewards = [];
+            episodeReward = 0;
+          }
         }
+        renderScene();
+        updateMetrics();
         requestAnimationFrame(step);
       }
-
+      
       /******************************************************
        * Initialization and Start
        ******************************************************/
