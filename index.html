@@ -1,207 +1,85 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
   <head>
-    <meta charset="UTF-8" />
-    <title>Cart-Pole AI Balancer</title>
-    <!-- Include TensorFlow.js -->
+    <meta charset="UTF-8">
+    <title>Cart-Pole AI Balancer using WebGL</title>
+    <!-- TensorFlow.js from CDN -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
-    <!-- Include p5.js -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
     <style>
       body, html {
         margin: 0;
         padding: 0;
         overflow: hidden;
-        background: #f0f0f0;
+      }
+      canvas {
+        display: block;
       }
     </style>
   </head>
   <body>
+    <canvas id="glcanvas" width="800" height="600"></canvas>
     <script>
       /******************************************************
-       * Physics and Simulation Parameters
+       * Simulation and Reinforcement Learning Setup
        ******************************************************/
+      // Physics parameters for the cart–pole system
       const gravity = 9.8;
       const massCart = 1.0;
       const massPole = 0.1;
       const totalMass = massCart + massPole;
-      const poleLength = 0.5;    // actual half-length (meters)
-      const forceMag = 10.0;     // magnitude of force applied to cart
-      const tau = 0.02;          // time step (seconds)
+      const poleLength = 0.5;  // half-length in meters
+      const forceMag = 10.0;
+      const tau = 0.02;      // simulation time step (seconds)
 
-      // State variables: x, x_dot, theta, theta_dot
-      let x = 0;
-      let x_dot = 0;
-      let theta = 0.05;   // small initial angle (radians)
-      let theta_dot = 0;
+      // State variables (x: cart position, theta: pole angle in radians)
+      let x = 0, x_dot = 0, theta = 0.05, theta_dot = 0;
+      const scaleFactor = 100;   // scale: meters to pixels
+      const offsetY = 100;       // vertical offset, in pixels
 
-      // For visual scaling (pixels per meter)
-      const scaleFactor = 100;
-      // To record the trajectory of the pole’s tip (global coordinates)
-      let trajectory = [];
-
-      /******************************************************
-       * Simulation Update Function
-       * action: -1 for left force, +1 for right force.
-       ******************************************************/
-      function simulateStep(action) {
-        const force = action * forceMag;
-        const costheta = Math.cos(theta);
-        const sintheta = Math.sin(theta);
-        
-        // Intermediate calculation based on the dynamics
-        const temp = (force + massPole * poleLength * theta_dot * theta_dot * sintheta) / totalMass;
-        // Angular acceleration
-        const theta_acc = (gravity * sintheta - costheta * temp) / 
-                          (poleLength * (4.0/3.0 - massPole * costheta * costheta / totalMass));
-        // Acceleration of the cart
-        const x_acc = temp - massPole * poleLength * theta_acc * costheta / totalMass;
-        
-        // Update state (Euler integration)
-        x += tau * x_dot;
-        x_dot += tau * x_acc;
-        theta += tau * theta_dot;
-        theta_dot += tau * theta_acc;
-
-        return [x, x_dot, theta, theta_dot];
-      }
-
-      /******************************************************
-       * TensorFlow.js Neural Network Controller
-       * The network takes the state [x, x_dot, theta, theta_dot]
-       * as input and outputs action probabilities.
-       ******************************************************/
-      const model = tf.sequential();
-      model.add(tf.layers.dense({ inputShape: [4], units: 24, activation: 'relu' }));
-      model.add(tf.layers.dense({ units: 24, activation: 'relu' }));
-      // Two outputs: probability of moving left or right.
-      model.add(tf.layers.dense({ units: 2, activation: 'softmax' }));
-      
-      const optimizer = tf.train.adam(0.01);
-      
-      function softmaxCrossEntropyNoReduction(labels, logits) {    const epsilon = 1e-7;    // Compute softmax probabilities.    
-      const softmax = tf.softmax(logits);    
-      const clippedSoftmax = softmax.clipByValue(epsilon, 1 - epsilon);    
-      const logSoftmax = tf.log(clippedSoftmax);    // The loss for each example: -∑ (labels * log(softmax))   
-      const perExampleLoss = tf.mul(labels, logSoftmax).sum(1).neg();    
-      return perExampleLoss;   }   
-      
-      function chooseAction(state) {
-        return tf.tidy(() => {
-          const logits = model.predict(tf.tensor2d([state]));
-          const probs = logits.dataSync();  // [probLeft, probRight]
-          // Sample an action based on probabilities
-          const rand = Math.random();
-          // Return -1 for left, +1 for right.
-          return (rand < probs[0] ? -1 : 1);
-        });
-      }
-
-      /******************************************************
-       * Reinforcement Learning Data Storage
-       ******************************************************/
+      // For RL training data
       let states = [];
       let actions = [];
       let rewards = [];
       let episodeReward = 0;
       let episodeCount = 0;
+      // For storing the tip trajectory of the pole
+      let trajectory = [];
 
-      /******************************************************
-       * p5.js Setup and Draw (Visualization + Simulation)
-       ******************************************************/
-      function setup() {
-        createCanvas(600, 400, WEBGL);
-        resetState();
+      // Build a simple policy network with TensorFlow.js
+      const model = tf.sequential();
+      model.add(tf.layers.dense({ inputShape: [4], units: 24, activation: 'relu' }));
+      model.add(tf.layers.dense({ units: 24, activation: 'relu' }));
+      model.add(tf.layers.dense({ units: 2, activation: 'softmax' }));
+      const optimizer = tf.train.adam(0.01);
+
+      // Given the current state, choose an action: -1 for left, +1 for right.
+      function chooseAction(state) {
+        return tf.tidy(() => {
+          const logits = model.predict(tf.tensor2d([state]));
+          const probs = logits.dataSync();  // [probLeft, probRight]
+          const rand = Math.random();
+          return (rand < probs[0]) ? -1 : 1;
+        });
       }
 
-      // Reset the simulation environment for a new episode.
-      function resetState() {
-        x = 0;
-        x_dot = 0;
-        theta = 0.05;
-        theta_dot = 0;
-        trajectory = [];  // clear the tip trajectory for new episode
+      // Update simulation state using Euler integration.
+      function simulateStep(action) {
+        const force = action * forceMag;
+        const costheta = Math.cos(theta);
+        const sintheta = Math.sin(theta);
+        const temp = (force + massPole * poleLength * theta_dot * theta_dot * sintheta) / totalMass;
+        const theta_acc = (gravity * sintheta - costheta * temp) /
+                          (poleLength * (4.0/3.0 - massPole * costheta * costheta / totalMass));
+        const x_acc = temp - massPole * poleLength * theta_acc * costheta / totalMass;
+        x += tau * x_dot;
+        x_dot += tau * x_acc;
+        theta += tau * theta_dot;
+        theta_dot += tau * theta_acc;
       }
 
-      // p5.js draw loop: updates simulation and drawing.
-      function draw() {
-        background(200);
-        // Use 2D transformation by translating origin to canvas center.
-        resetMatrix();
-        translate(width / 2, height / 2);
-
-        // Obtain current state and choose an action via the policy.
-        const currentState = [x, x_dot, theta, theta_dot];
-        const action = chooseAction(currentState);
-        simulateStep(action);
-
-        // Save state, action and assign a reward.
-        states.push(currentState);
-        // Represent actions as 0 (left) and 1 (right)
-        actions.push(action === -1 ? 0 : 1);
-        // Reward: +1 if pole is nearly upright.
-        const reward = (Math.abs(theta) < Math.PI / 6) ? 1 : 0;
-        rewards.push(reward);
-        episodeReward += reward;
-
-        // Record the tip’s global coordinates:
-        // Cart is drawn at (x * scaleFactor, 100)
-        // The tip of the pole in the cart’s local coordinate (after applying rotation) is:
-        // local tip = (sin(theta) * L, -cos(theta) * L), where L = poleLength * scaleFactor.
-        let L = poleLength * scaleFactor;
-        // Global tip coordinates (relative to canvas center)
-        let tipX = x * scaleFactor + Math.sin(theta) * L;
-        let tipY = 100 - Math.cos(theta) * L;
-        trajectory.push({ x: tipX, y: tipY });
-
-        // Draw the ground (a simple line)
-        stroke(100);
-        strokeWeight(2);
-        line(-width/2, 100, width/2, 100);
-
-        // Draw the cart as a rectangle.
-        rectMode(CENTER);
-        noStroke();
-        fill(0);
-        rect(x * scaleFactor, 100, 50, 20);
-
-        // Draw the pole.
-        push();
-        translate(x * scaleFactor, 100);
-        rotate(theta);
-        stroke(255, 0, 0);
-        strokeWeight(4);
-        line(0, 0, 0, -L);
-        pop();
-
-        // Draw the pole's tip trajectory.
-        noFill();
-        stroke(0, 0, 255, 150);
-        beginShape();
-        for (let pt of trajectory) {
-          vertex(pt.x, pt.y);
-        }
-        endShape();
-
-        // Check if the pole falls (angle too large) or cart goes off-screen.
-        if (Math.abs(theta) > Math.PI / 2 || Math.abs(x * scaleFactor) > width / 2) {
-          // End episode, trigger training.
-          episodeCount++;
-          console.log("Episode:", episodeCount, "Total reward:", episodeReward);
-          trainModel();  // Train on collected data.
-          resetState();
-          states = [];
-          actions = [];
-          rewards = [];
-          episodeReward = 0;
-        }
-      }
-
-      /******************************************************
-       * Training the Policy with a Policy Gradient Method
-       ******************************************************/
+      // Train the policy network using policy gradients.
       function trainModel() {
-        // Compute discounted rewards.
+        // Compute discounted rewards
         const discountedRewards = [];
         let sum = 0;
         const gamma = 0.99;
@@ -210,24 +88,234 @@
           discountedRewards[i] = sum;
         }
         
-        // Convert arrays into tensors.
         const statesTensor = tf.tensor2d(states);
         const actionsTensor = tf.tensor1d(actions, 'int32');
         const rewardsTensor = tf.tensor1d(discountedRewards);
         
-        // Run an optimizer step.
-        optimizer.minimize(() => {    
-          const logits = model.predict(statesTensor);    
-          const actionOHE = tf.oneHot(actionsTensor, 2);    
-          const lossPerExample = softmaxCrossEntropyNoReduction(actionOHE, logits);    
-          const loss = tf.mean(tf.mul(lossPerExample, rewardsTensor));    
-          return loss;   }); 
+        optimizer.minimize(() => {
+          const logits = model.predict(statesTensor);
+          const actionOHE = tf.oneHot(actionsTensor, 2);  // one-hot: 0 for left, 1 for right
+          // Manually compute a per-example softmax cross-entropy loss:
+          const epsilon = 1e-7;
+          const softmax = tf.softmax(logits);
+          const clipped = tf.clipByValue(softmax, epsilon, 1 - epsilon);
+          const logSoftmax = tf.log(clipped);
+          const perExampleLoss = tf.mul(actionOHE, logSoftmax).sum(1).neg();
+          const loss = tf.mean(tf.mul(perExampleLoss, rewardsTensor));
+          return loss;
+        });
         
-        // Dispose tensors to free up GPU memory.
         statesTensor.dispose();
         actionsTensor.dispose();
         rewardsTensor.dispose();
       }
+
+      /******************************************************
+       * WebGL Rendering Setup and Functions
+       ******************************************************/
+      let canvas, gl, program, positionBuffer;
+      let resolutionUniformLocation, colorUniformLocation, positionAttribLocation;
+
+      // Initialize WebGL context, compile shaders, and set uniforms.
+      function initGL() {
+        canvas = document.getElementById('glcanvas');
+        gl = canvas.getContext('webgl');
+        if (!gl) {
+          alert("WebGL not supported");
+          return;
+        }
+        
+        // Vertex shader: converts pixel positions to clip space.
+        const vsSource = `
+          attribute vec2 a_position;
+          uniform vec2 u_resolution;
+          void main() {
+            vec2 zeroToOne = a_position / u_resolution;
+            vec2 zeroToTwo = zeroToOne * 2.0;
+            vec2 clipSpace = zeroToTwo - 1.0;
+            gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
+          }
+        `;
+        // Fragment shader: outputs a uniform color.
+        const fsSource = `
+          precision mediump float;
+          uniform vec4 u_color;
+          void main() {
+            gl_FragColor = u_color;
+          }
+        `;
+        const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+        const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+        program = createProgram(gl, vertexShader, fragmentShader);
+        
+        // Get attribute and uniform locations from the shader program.
+        positionAttribLocation = gl.getAttribLocation(program, "a_position");
+        resolutionUniformLocation = gl.getUniformLocation(program, "u_resolution");
+        colorUniformLocation = gl.getUniformLocation(program, "u_color");
+
+        // Create one buffer for all our drawing calls.
+        positionBuffer = gl.createBuffer();
+      }
+
+      // Helper function to compile a shader.
+      function createShader(gl, type, source) {
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        if (gl.getShaderParameter(shader, gl.COMPILE_STATUS))
+          return shader;
+        console.log(gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+      }
+
+      // Link shaders into a program.
+      function createProgram(gl, vertexShader, fragmentShader) {
+        const program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+        if (gl.getProgramParameter(program, gl.LINK_STATUS))
+          return program;
+        console.log(gl.getProgramInfoLog(program));
+        gl.deleteProgram(program);
+      }
+
+      // Construct vertices for a rectangle (two triangles).
+      function setRectangle(x, y, width, height) {
+        const x1 = x, y1 = y;
+        const x2 = x + width, y2 = y + height;
+        return new Float32Array([
+          x1, y1,
+          x2, y1,
+          x1, y2,
+          x1, y2,
+          x2, y1,
+          x2, y2,
+        ]);
+      }
+
+      // Generic function to draw using provided vertices, color, and draw mode.
+      function drawShape(vertices, color, mode) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(positionAttribLocation);
+        gl.vertexAttribPointer(positionAttribLocation, 2, gl.FLOAT, false, 0, 0);
+        gl.uniform4f(colorUniformLocation, color[0], color[1], color[2], color[3]);
+        gl.drawArrays(mode, 0, vertices.length / 2);
+      }
+
+      // Convenience: draw a line (or a connected line strip) from an array of points.
+      function drawLine(points, color, mode = gl.LINE_STRIP) {
+        const vertices = new Float32Array(points);
+        drawShape(vertices, color, mode);
+      }
+
+      // Draw a filled rectangle.
+      function drawRect(x, y, width, height, color) {
+        const vertices = setRectangle(x, y, width, height);
+        drawShape(vertices, color, gl.TRIANGLES);
+      }
+
+      // Render our entire simulation scene.
+      function render() {
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.clearColor(0.9, 0.9, 0.9, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(program);
+        gl.uniform2f(resolutionUniformLocation, canvas.width, canvas.height);
+        
+        // Draw the ground as a horizontal line.
+        const groundY = canvas.height / 2 + offsetY;
+        drawLine([0, groundY, canvas.width, groundY], [0.4, 0.4, 0.4, 1], gl.LINES);
+        
+        // Compute cart (kernel) position in pixel coordinates.
+        const cartX = canvas.width / 2 + (x * scaleFactor);
+        const cartY = canvas.height / 2 + offsetY;
+        // Draw the cart as a 50x20 rectangle (centered at (cartX, cartY)).
+        drawRect(cartX - 25, cartY - 10, 50, 20, [0, 0, 0, 1]);
+        
+        // Compute the pole’s tip position.
+        const L = poleLength * scaleFactor;
+        const tipX = cartX + Math.sin(theta) * L;
+        const tipY = cartY - Math.cos(theta) * L;
+        // Draw the pole as a red line.
+        drawLine([cartX, cartY, tipX, tipY], [1, 0, 0, 1], gl.LINES);
+        
+        // Draw the trajectory of the pole’s tip as a blue line strip.
+        if (trajectory.length > 1) {
+          let trajPoints = [];
+          for (let pt of trajectory) {
+            trajPoints.push(pt.x, pt.y);
+          }
+          drawLine(trajPoints, [0, 0, 1, 0.6], gl.LINE_STRIP);
+        }
+      }
+
+      // Save the current pole tip position into the trajectory array.
+      function updateTrajectory() {
+        const cartX = canvas.width / 2 + (x * scaleFactor);
+        const cartY = canvas.height / 2 + offsetY;
+        const L = poleLength * scaleFactor;
+        const tipX = cartX + Math.sin(theta) * L;
+        const tipY = cartY - Math.cos(theta) * L;
+        trajectory.push({ x: tipX, y: tipY });
+        // Limit the number of stored trajectory points.
+        if (trajectory.length > 500) trajectory.shift();
+      }
+
+      // Failure if the pole falls too far or the cart goes off-screen.
+      function checkFailure() {
+        return (Math.abs(theta) > Math.PI / 2 ||
+                Math.abs(x * scaleFactor) > canvas.width / 2);
+      }
+
+      // Reset the simulation for a new episode.
+      function resetSimulation() {
+        x = 0;
+        x_dot = 0;
+        theta = 0.05;
+        theta_dot = 0;
+        trajectory = [];
+      }
+
+      /******************************************************
+       * Main Animation Loop
+       ******************************************************/
+      function step() {
+        // Get current state and choose an action using the policy network.
+        const currentState = [x, x_dot, theta, theta_dot];
+        const action = chooseAction(currentState);
+        simulateStep(action);
+        
+        // Record the simulation step for RL training.
+        states.push(currentState);
+        actions.push(action === -1 ? 0 : 1);  // store action as 0 (left) / 1 (right)
+        const reward = (Math.abs(theta) < Math.PI / 6) ? 1 : 0;
+        rewards.push(reward);
+        episodeReward += reward;
+        
+        updateTrajectory();
+        render();
+        
+        // Check if the episode is over (failure condition reached).
+        if (checkFailure()) {
+          episodeCount++;
+          console.log("Episode:", episodeCount, "Total reward:", episodeReward);
+          trainModel();
+          resetSimulation();
+          states = [];
+          actions = [];
+          rewards = [];
+          episodeReward = 0;
+        }
+        requestAnimationFrame(step);
+      }
+
+      /******************************************************
+       * Initialization and Start
+       ******************************************************/
+      initGL();
+      requestAnimationFrame(step);
     </script>
   </body>
 </html>
