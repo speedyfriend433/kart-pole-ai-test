@@ -187,32 +187,58 @@
        * Training Function (Policy Gradient)
        ******************************************************/
       function trainModel() {
-        // Compute discounted rewards.
-        const discountedRewards = [];
-        let sum = 0;
-        const gamma = 0.99;
-        for (let i = rewards.length - 1; i >= 0; i--) {
-          sum = rewards[i] + gamma * sum;
-          discountedRewards[i] = sum;
-        }
-        const statesTensor = tf.tensor2d(states);
-        const actionsTensor = tf.tensor1d(actions, 'int32');
-        const rewardsTensor = tf.tensor1d(discountedRewards);
-        optimizer.minimize(() => {
-          const logits = model.predict(statesTensor);
-          const actionOHE = tf.oneHot(actionsTensor, 2);
-          const epsilon = 1e-7;
-          const softmax = tf.softmax(logits);
-          const clipped = tf.clipByValue(softmax, epsilon, 1 - epsilon);
-          const logSoftmax = tf.log(clipped);
-          const perExampleLoss = tf.mul(actionOHE, logSoftmax).sum(1).neg();
-          const loss = tf.mean(tf.mul(perExampleLoss, rewardsTensor));
-          return loss;
-        });
-        statesTensor.dispose();
-        actionsTensor.dispose();
-        rewardsTensor.dispose();
-      }
+  // Compute discounted rewards.
+  const discountedRewards = [];
+  let sum = 0;
+  const gamma = 0.99;
+  for (let i = rewards.length - 1; i >= 0; i--) {
+    sum = rewards[i] + gamma * sum;
+    discountedRewards[i] = sum;
+  }
+  
+  // Convert collected data to tensors.
+  const statesTensor = tf.tensor2d(states);
+  const actionsTensor = tf.tensor1d(actions, 'int32');
+  const rewardsTensor = tf.tensor1d(discountedRewards);
+  
+  // Use the optimizer to minimize the custom loss.
+  optimizer.minimize(() => {
+    // Predict action probabilities for all states.
+    const logits = model.predict(statesTensor);
+    // Create one-hot encoded actions.
+    const actionOHE = tf.oneHot(actionsTensor, 2);
+    // Small constant for numerical stability.
+    const epsilon = 1e-7;
+    
+    // Compute the softmax probabilities and clip to avoid log(0).
+    const softmax = tf.softmax(logits);
+    const clipped = tf.clipByValue(softmax, epsilon, 1 - epsilon);
+    const logSoftmax = tf.log(clipped);
+    
+    // Compute the standard policy gradient loss term:
+    // Negative log probability for the taken actions.
+    const perExampleLoss = tf.mul(actionOHE, logSoftmax).sum(1).neg();
+    
+    // Compute the entropy of the policy for each example.
+    // Entropy = - ∑ p * log(p)
+    const entropy = tf.mul(softmax, logSoftmax).sum(1).neg();
+    
+    // Set a small constant to regulate the strength of the entropy bonus.
+    const beta = 0.01; // Try adjusting this value.
+    
+    // Combine the policy loss and entropy bonus.
+    // We subtract beta * entropy from the loss to encourage exploration.
+    const loss = tf.mean(tf.mul(perExampleLoss, rewardsTensor).sub(tf.mul(beta, entropy)));
+    
+    return loss;
+  });
+  
+  // Clean up tensors.
+  statesTensor.dispose();
+  actionsTensor.dispose();
+  rewardsTensor.dispose();
+}
+
       
       /******************************************************
        * WebGL Rendering Setup and Functions
