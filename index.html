@@ -599,15 +599,17 @@ function trainActorCriticModel() {
           episodeReward += rewards[rewards.length - 1];
           
           if (checkFailure()) {
-            episodeCount++;
-            console.log("Episode:", episodeCount, "Total reward:", episodeReward);
-            trainModel();
-            resetSimulation();
-            states = [];
-            actions = [];
-            rewards = [];
-            episodeReward = 0;
-          }
+  episodeCount++;
+  console.log("Episode:", episodeCount, "Total reward:", episodeReward);
+  // Replace trainModel() with trainActorCriticModel()
+  trainActorCriticModel();
+  resetSimulation();
+  states = [];
+  actions = [];
+  rewards = [];
+  episodeReward = 0;
+}
+
         }
         renderScene();
         updateMetrics();
