@@ -78,7 +78,14 @@
       model.add(tf.layers.dense({ units: 2, activation: 'softmax' }));
       
       const optimizer = tf.train.adam(0.01);
-
+      
+      function softmaxCrossEntropyNoReduction(labels, logits) {    const epsilon = 1e-7;    // Compute softmax probabilities.    
+      const softmax = tf.softmax(logits);    
+      const clippedSoftmax = softmax.clipByValue(epsilon, 1 - epsilon);    
+      const logSoftmax = tf.log(clippedSoftmax);    // The loss for each example: -∑ (labels * log(softmax))   
+      const perExampleLoss = tf.mul(labels, logSoftmax).sum(1).neg();    
+      return perExampleLoss;   }   
+      
       function chooseAction(state) {
         return tf.tidy(() => {
           const logits = model.predict(tf.tensor2d([state]));
@@ -209,15 +216,12 @@
         const rewardsTensor = tf.tensor1d(discountedRewards);
         
         // Run an optimizer step.
-        optimizer.minimize(() => {
-          const logits = model.predict(statesTensor);
-          // Create a one-hot encoded representation of the actions.
-          const actionOHE = tf.oneHot(actionsTensor, 2);
-          // Compute the negative log likelihood of the actions weighted by the rewards.
-          const negLogProb = tf.losses.softmaxCrossEntropy(actionOHE, logits, { reduction: 'none' });
-          const loss = tf.mean(tf.mul(negLogProb, rewardsTensor));
-          return loss;
-        });
+        optimizer.minimize(() => {    
+          const logits = model.predict(statesTensor);    
+          const actionOHE = tf.oneHot(actionsTensor, 2);    
+          const lossPerExample = softmaxCrossEntropyNoReduction(actionOHE, logits);    
+          const loss = tf.mean(tf.mul(lossPerExample, rewardsTensor));    
+          return loss;   }); 
         
         // Dispose tensors to free up GPU memory.
         statesTensor.dispose();
