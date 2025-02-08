@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Cart-Pole AI Balancer</title>
+    <!-- Include TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <!-- Include p5.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+    <style>
+      body, html {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #f0f0f0;
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      /******************************************************
+       * Physics and Simulation Parameters
+       ******************************************************/
+      const gravity = 9.8;
+      const massCart = 1.0;
+      const massPole = 0.1;
+      const totalMass = massCart + massPole;
+      const poleLength = 0.5;    // actual half-length (meters)
+      const forceMag = 10.0;     // magnitude of force applied to cart
+      const tau = 0.02;          // time step (seconds)
+
+      // State variables: x, x_dot, theta, theta_dot
+      let x = 0;
+      let x_dot = 0;
+      let theta = 0.05;   // small initial angle (radians)
+      let theta_dot = 0;
+
+      // For visual scaling (pixels per meter)
+      const scaleFactor = 100;
+      // To record the trajectory of the pole’s tip (global coordinates)
+      let trajectory = [];
+
+      /******************************************************
+       * Simulation Update Function
+       * action: -1 for left force, +1 for right force.
+       ******************************************************/
+      function simulateStep(action) {
+        const force = action * forceMag;
+        const costheta = Math.cos(theta);
+        const sintheta = Math.sin(theta);
+        
+        // Intermediate calculation based on the dynamics
+        const temp = (force + massPole * poleLength * theta_dot * theta_dot * sintheta) / totalMass;
+        // Angular acceleration
+        const theta_acc = (gravity * sintheta - costheta * temp) / 
+                          (poleLength * (4.0/3.0 - massPole * costheta * costheta / totalMass));
+        // Acceleration of the cart
+        const x_acc = temp - massPole * poleLength * theta_acc * costheta / totalMass;
+        
+        // Update state (Euler integration)
+        x += tau * x_dot;
+        x_dot += tau * x_acc;
+        theta += tau * theta_dot;
+        theta_dot += tau * theta_acc;
+
+        return [x, x_dot, theta, theta_dot];
+      }
+
+      /******************************************************
+       * TensorFlow.js Neural Network Controller
+       * The network takes the state [x, x_dot, theta, theta_dot]
+       * as input and outputs action probabilities.
+       ******************************************************/
+      const model = tf.sequential();
+      model.add(tf.layers.dense({ inputShape: [4], units: 24, activation: 'relu' }));
+      model.add(tf.layers.dense({ units: 24, activation: 'relu' }));
+      // Two outputs: probability of moving left or right.
+      model.add(tf.layers.dense({ units: 2, activation: 'softmax' }));
+      
+      const optimizer = tf.train.adam(0.01);
+
+      function chooseAction(state) {
+        return tf.tidy(() => {
+          const logits = model.predict(tf.tensor2d([state]));
+          const probs = logits.dataSync();  // [probLeft, probRight]
+          // Sample an action based on probabilities
+          const rand = Math.random();
+          // Return -1 for left, +1 for right.
+          return (rand < probs[0] ? -1 : 1);
+        });
+      }
+
+      /******************************************************
+       * Reinforcement Learning Data Storage
+       ******************************************************/
+      let states = [];
+      let actions = [];
+      let rewards = [];
+      let episodeReward = 0;
+      let episodeCount = 0;
+
+      /******************************************************
+       * p5.js Setup and Draw (Visualization + Simulation)
+       ******************************************************/
+      function setup() {
+        createCanvas(600, 400, WEBGL);
+        resetState();
+      }
+
+      // Reset the simulation environment for a new episode.
+      function resetState() {
+        x = 0;
+        x_dot = 0;
+        theta = 0.05;
+        theta_dot = 0;
+        trajectory = [];  // clear the tip trajectory for new episode
+      }
+
+      // p5.js draw loop: updates simulation and drawing.
+      function draw() {
+        background(200);
+        // Use 2D transformation by translating origin to canvas center.
+        resetMatrix();
+        translate(width / 2, height / 2);
+
+        // Obtain current state and choose an action via the policy.
+        const currentState = [x, x_dot, theta, theta_dot];
+        const action = chooseAction(currentState);
+        simulateStep(action);
+
+        // Save state, action and assign a reward.
+        states.push(currentState);
+        // Represent actions as 0 (left) and 1 (right)
+        actions.push(action === -1 ? 0 : 1);
+        // Reward: +1 if pole is nearly upright.
+        const reward = (Math.abs(theta) < Math.PI / 6) ? 1 : 0;
+        rewards.push(reward);
+        episodeReward += reward;
+
+        // Record the tip’s global coordinates:
+        // Cart is drawn at (x * scaleFactor, 100)
+        // The tip of the pole in the cart’s local coordinate (after applying rotation) is:
+        // local tip = (sin(theta) * L, -cos(theta) * L), where L = poleLength * scaleFactor.
+        let L = poleLength * scaleFactor;
+        // Global tip coordinates (relative to canvas center)
+        let tipX = x * scaleFactor + Math.sin(theta) * L;
+        let tipY = 100 - Math.cos(theta) * L;
+        trajectory.push({ x: tipX, y: tipY });
+
+        // Draw the ground (a simple line)
+        stroke(100);
+        strokeWeight(2);
+        line(-width/2, 100, width/2, 100);
+
+        // Draw the cart as a rectangle.
+        rectMode(CENTER);
+        noStroke();
+        fill(0);
+        rect(x * scaleFactor, 100, 50, 20);
+
+        // Draw the pole.
+        push();
+        translate(x * scaleFactor, 100);
+        rotate(theta);
+        stroke(255, 0, 0);
+        strokeWeight(4);
+        line(0, 0, 0, -L);
+        pop();
+
+        // Draw the pole's tip trajectory.
+        noFill();
+        stroke(0, 0, 255, 150);
+        beginShape();
+        for (let pt of trajectory) {
+          vertex(pt.x, pt.y);
+        }
+        endShape();
+
+        // Check if the pole falls (angle too large) or cart goes off-screen.
+        if (Math.abs(theta) > Math.PI / 2 || Math.abs(x * scaleFactor) > width / 2) {
+          // End episode, trigger training.
+          episodeCount++;
+          console.log("Episode:", episodeCount, "Total reward:", episodeReward);
+          trainModel();  // Train on collected data.
+          resetState();
+          states = [];
+          actions = [];
+          rewards = [];
+          episodeReward = 0;
+        }
+      }
+
+      /******************************************************
+       * Training the Policy with a Policy Gradient Method
+       ******************************************************/
+      function trainModel() {
+        // Compute discounted rewards.
+        const discountedRewards = [];
+        let sum = 0;
+        const gamma = 0.99;
+        for (let i = rewards.length - 1; i >= 0; i--) {
+          sum = rewards[i] + gamma * sum;
+          discountedRewards[i] = sum;
+        }
+        
+        // Convert arrays into tensors.
+        const statesTensor = tf.tensor2d(states);
+        const actionsTensor = tf.tensor1d(actions, 'int32');
+        const rewardsTensor = tf.tensor1d(discountedRewards);
+        
+        // Run an optimizer step.
+        optimizer.minimize(() => {
+          const logits = model.predict(statesTensor);
+          // Create a one-hot encoded representation of the actions.
+          const actionOHE = tf.oneHot(actionsTensor, 2);
+          // Compute the negative log likelihood of the actions weighted by the rewards.
+          const negLogProb = tf.losses.softmaxCrossEntropy(actionOHE, logits, { reduction: 'none' });
+          const loss = tf.mean(tf.mul(negLogProb, rewardsTensor));
+          return loss;
+        });
+        
+        // Dispose tensors to free up GPU memory.
+        statesTensor.dispose();
+        actionsTensor.dispose();
+        rewardsTensor.dispose();
+      }
+    </script>
+  </body>
+</html>
