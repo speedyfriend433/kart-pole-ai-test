@@ -203,10 +203,9 @@ let actorModel, criticModel;  // global declaration
 
 function setupActorCriticModels() {
   // Define stateDim based on the simulation type.
-  /*const stateDim = simulationType === "1-pole" ? 4 : 6;
-  const numActions = 2;*/
+  const stateDim = simulationType === "1-pole" ? 4 : 6;
   // Global simulation variables
-let simulationType = "1-pole";
+// let simulationType = "1-pole";
 // For both 1-pole and 2-pole cases, we assume 2 possible actions: left (-1) and right (+1)
 const numActions = 2;
 
