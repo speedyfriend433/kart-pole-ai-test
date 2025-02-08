@@ -203,33 +203,32 @@ let actorModel, criticModel;  // global declaration
 
 function setupActorCriticModels() {
   // Define stateDim based on the simulation type.
-  const stateDim = simulationType === "1-pole" ? 4 : 6;
+  const numActions = 2; // Global constant for the two possible actions: left and right
+  const stateDim = simulationType === "1-pole" ? 4 : 6; // Using the global numActions now.
+
+  // Dispose previous models if any.
+  if (actorModel) actorModel.dispose(); 
+  if (criticModel) criticModel.dispose();
+
   // Global simulation variables
 // let simulationType = "1-pole";
 // For both 1-pole and 2-pole cases, we assume 2 possible actions: left (-1) and right (+1)
-const numActions = 2;
 
  // For left and right actions
-  
-  // Dispose previous models, if any.
-  if (actorModel) actorModel.dispose();
-  if (criticModel) criticModel.dispose();
-
   // Create (or recreate) the actor network.
-  actorModel = tf.sequential();
-  actorModel.add(tf.layers.dense({ inputShape: [stateDim], units: 24, activation: 'relu' }));
-  actorModel.add(tf.layers.dense({ units: 24, activation: 'relu' }));
+  // Create the actor network. 
+  actorModel = tf.sequential(); 
+  actorModel.add(tf.layers.dense({ inputShape: [stateDim], units: 24, activation: 'relu' })); 
+  actorModel.add(tf.layers.dense({ units: 24, activation: 'relu' })); 
   actorModel.add(tf.layers.dense({ units: numActions, activation: 'softmax' }));
 
-  // Create the critic network.
-  criticModel = tf.sequential();
-  criticModel.add(tf.layers.dense({ inputShape: [stateDim], units: 24, activation: 'relu' }));
-  criticModel.add(tf.layers.dense({ units: 24, activation: 'relu' }));
+// Create the critic network. 
+  criticModel = tf.sequential(); 
+  criticModel.add(tf.layers.dense({ inputShape: [stateDim], units: 24, activation: 'relu' })); 
+  criticModel.add(tf.layers.dense({ units: 24, activation: 'relu' })); 
   criticModel.add(tf.layers.dense({ units: 1, activation: 'linear' }));
 
-  // Instead of using let again, simply reassign the optimizer.
-  optimizer = tf.train.adam(0.01);
-}
+optimizer = tf.train.adam(0.01); }
 
 
 
