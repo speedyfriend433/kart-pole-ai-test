@@ -202,6 +202,10 @@ function chooseAction(state) {
 let actorModel, criticModel;  // global declaration
 
 function setupActorCriticModels() {
+  // Define stateDim based on the simulation type.
+  const stateDim = simulationType === "1-pole" ? 4 : 6;
+  const numActions = 2; // For left and right actions
+  
   // Dispose previous models, if any.
   if (actorModel) actorModel.dispose();
   if (criticModel) criticModel.dispose();
@@ -211,16 +215,17 @@ function setupActorCriticModels() {
   actorModel.add(tf.layers.dense({ inputShape: [stateDim], units: 24, activation: 'relu' }));
   actorModel.add(tf.layers.dense({ units: 24, activation: 'relu' }));
   actorModel.add(tf.layers.dense({ units: numActions, activation: 'softmax' }));
-  
+
   // Create the critic network.
   criticModel = tf.sequential();
   criticModel.add(tf.layers.dense({ inputShape: [stateDim], units: 24, activation: 'relu' }));
   criticModel.add(tf.layers.dense({ units: 24, activation: 'relu' }));
   criticModel.add(tf.layers.dense({ units: 1, activation: 'linear' }));
-  
-  // Instead of letting optimizer be declared again, we reassign it.
+
+  // Instead of using let again, simply reassign the optimizer.
   optimizer = tf.train.adam(0.01);
 }
+
 
 
 // Call this function at initialization or if you change simulation type.
