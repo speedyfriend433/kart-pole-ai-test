@@ -131,15 +131,26 @@
       
       // Choose an action based on current state. For single pole, state has 4 elements;
       // for double, 6 elements.
-      function chooseAction(state) {
-        return tf.tidy(() => {
-          const logits = model.predict(tf.tensor2d([state]));
-          const probs = logits.dataSync();
-          const rand = Math.random();
-          // Action: -1 for left, +1 for right.
-          return (rand < probs[0]) ? -1 : 1;
-        });
-      }
+      // Global variables for epsilon-greedy exploration.
+let epsilon = 1.0;       // Start with full exploration.
+const epsilonDecay = 0.995;  // Decay factor after each episode.
+const minEpsilon = 0.1;      // Minimum value for epsilon.
+
+// Modified chooseAction function using epsilon-greedy.
+function chooseAction(state) {
+  // With probability epsilon, choose a random action.
+  if (Math.random() < epsilon) {
+    return Math.random() < 0.5 ? -1 : 1;
+  } else {
+    // Otherwise, get an action from the policy network.
+    return tf.tidy(() => {
+      const logits = model.predict(tf.tensor2d([state]));
+      const probs = logits.dataSync(); // e.g. [probLeft, probRight]
+      // Sample action based on predicted probabilities.
+      return (Math.random() < probs[0]) ? -1 : 1;
+    });
+  }
+}
       
       /******************************************************
        * Simulation Step Functions
@@ -186,58 +197,103 @@
       /******************************************************
        * Training Function (Policy Gradient)
        ******************************************************/
-      function trainModel() {
-  // Compute discounted rewards.
-  const discountedRewards = [];
+      // First, create your Actor and Critic networks.
+// You may adjust the architecture as needed.
+let actorModel, criticModel, optimizer;
+const numActions = 2; // For left (-1) and right (+1)
+const stateDim = simulationType === "1-pole" ? 4 : 6; // adapt to your state definition
+
+function setupActorCriticModels() {
+  // Dispose previous models, if any.
+  if (actorModel) actorModel.dispose();
+  if (criticModel) criticModel.dispose();
+
+  // Actor: a simple feedforward network that outputs action probabilities.
+  actorModel = tf.sequential();
+  actorModel.add(tf.layers.dense({ inputShape: [stateDim], units: 24, activation: 'relu' }));
+  actorModel.add(tf.layers.dense({ units: 24, activation: 'relu' }));
+  actorModel.add(tf.layers.dense({ units: numActions, activation: 'softmax' }));
+  
+  // Critic: similar structure but output a single scalar (Value estimate).
+  criticModel = tf.sequential();
+  criticModel.add(tf.layers.dense({ inputShape: [stateDim], units: 24, activation: 'relu' }));
+  criticModel.add(tf.layers.dense({ units: 24, activation: 'relu' }));
+  criticModel.add(tf.layers.dense({ units: 1, activation: 'linear' }));
+
+  // Single optimizer to train both networks (together they have all trainable weights).
+  optimizer = tf.train.adam(0.01);
+}
+
+// Call this function at initialization or if you change simulation type.
+setupActorCriticModels();
+
+// Now, the sophisticated training function using actor–critic.
+// This function computes the discounted returns, advantage estimates,
+// and then uses them to compute combined actor and critic losses (with an added entropy bonus).
+function trainActorCriticModel() {
+  // Compute discounted returns from the rewards array.
+  const discountedReturns = [];
   let sum = 0;
   const gamma = 0.99;
   for (let i = rewards.length - 1; i >= 0; i--) {
     sum = rewards[i] + gamma * sum;
-    discountedRewards[i] = sum;
+    discountedReturns[i] = sum;
   }
   
   // Convert collected data to tensors.
-  const statesTensor = tf.tensor2d(states);
-  const actionsTensor = tf.tensor1d(actions, 'int32');
-  const rewardsTensor = tf.tensor1d(discountedRewards);
+  const statesTensor = tf.tensor2d(states);         // shape: [numSteps, stateDim]
+  const actionsTensor = tf.tensor1d(actions, 'int32'); // shape: [numSteps]
+  const returnsTensor = tf.tensor1d(discountedReturns); // shape: [numSteps]
   
-  // Use the optimizer to minimize the custom loss.
+  // Use the optimizer to update both actor and critic.
   optimizer.minimize(() => {
-    // Predict action probabilities for all states.
-    const logits = model.predict(statesTensor);
-    // Create one-hot encoded actions.
-    const actionOHE = tf.oneHot(actionsTensor, 2);
-    // Small constant for numerical stability.
-    const epsilon = 1e-7;
+    // Actor forward pass: predict action probabilities.
+    const logits = actorModel.predict(statesTensor);
+    const actionProbs = tf.softmax(logits);
     
-    // Compute the softmax probabilities and clip to avoid log(0).
-    const softmax = tf.softmax(logits);
-    const clipped = tf.clipByValue(softmax, epsilon, 1 - epsilon);
-    const logSoftmax = tf.log(clipped);
+    // Critic forward pass: predict state values.
+    // Reshape the critic output to a 1D tensor.
+    const values = criticModel.predict(statesTensor).reshape([statesTensor.shape[0]]);
     
-    // Compute the standard policy gradient loss term:
-    // Negative log probability for the taken actions.
-    const perExampleLoss = tf.mul(actionOHE, logSoftmax).sum(1).neg();
+    // Compute advantage: advantage = (discounted return) - (estimated value)
+    // (Optionally, you could also normalize the advantage.)
+    const advantages = returnsTensor.sub(values);
     
-    // Compute the entropy of the policy for each example.
-    // Entropy = - ∑ p * log(p)
-    const entropy = tf.mul(softmax, logSoftmax).sum(1).neg();
+    // Compute the actor loss.
+    // 1. Create one-hot encodings for the actions taken.
+    const oneHotActions = tf.oneHot(actionsTensor, numActions);
+    // 2. Compute log probabilities for each action.
+    const logProbs = tf.log(tf.clipByValue(actionProbs, 1e-7, 1));
+    // 3. For each step, select the log probability corresponding to the taken action.
+    const selectedLogProbs = tf.mul(oneHotActions, logProbs).sum(1);
+    // 4. The policy loss is the negative of the (advantage-weighted) log probabilities.
+    const actorLoss = selectedLogProbs.mul(advantages).neg().mean();
     
-    // Set a small constant to regulate the strength of the entropy bonus.
-    const beta = 0.01; // Try adjusting this value.
+    // Compute the entropy of the policy distribution.
+    // Entropy = -sum(p * log(p)), averaged over examples.
+    const entropy = tf.mul(actionProbs, logProbs).sum(1).neg().mean();
+    // A small factor for the entropy bonus.
+    const entBonusWeight = 0.01;
+    const entropyBonus = entropy.mul(entBonusWeight);
     
-    // Combine the policy loss and entropy bonus.
-    // We subtract beta * entropy from the loss to encourage exploration.
-    const loss = tf.mean(tf.mul(perExampleLoss, rewardsTensor).sub(tf.mul(beta, entropy)));
+    // Critic loss: mean-squared error between predicted values and discounted returns.
+    const criticLoss = advantages.square().mean();
     
-    return loss;
-  });
+    // Combine the losses.
+    // We add actorLoss and criticLoss, and subtract the entropy bonus so as to encourage exploration.
+    const totalLoss = actorLoss.add(criticLoss).sub(entropyBonus);
+    return totalLoss;
+  }, 
+  // Update all trainable variables from both models.
+  actorModel.trainableWeights.concat(criticModel.trainableWeights));
   
-  // Clean up tensors.
+  // Clean-up (dispose intermediate tensors).
   statesTensor.dispose();
   actionsTensor.dispose();
-  rewardsTensor.dispose();
+  returnsTensor.dispose();
 }
+
+
 
       
       /******************************************************
