@@ -2,11 +2,10 @@
 <html>
   <head>
     <meta charset="UTF-8">
-    <title>Enhanced Cart-Pole AI Balancer with WebGL</title>
+    <title>Enhanced Cart-Pole AI Balancer – Multiple Pole Options</title>
     <!-- TensorFlow.js CDN -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
     <style>
-      /* Basic style for full-window canvas and control panel overlay */
       body, html {
         margin: 0;
         padding: 0;
@@ -20,12 +19,12 @@
         position: absolute;
         top: 10px;
         left: 10px;
-        background: rgba(255,255,255,0.9);
+        background: rgba(255, 255, 255, 0.9);
         padding: 10px;
         border-radius: 5px;
         z-index: 100;
       }
-      #controlPanel label, #controlPanel button {
+      #controlPanel label, #controlPanel button, #controlPanel select {
         font-size: 13px;
       }
       #metrics {
@@ -35,14 +34,16 @@
     </style>
   </head>
   <body>
-    <!-- Our canvas for WebGL rendering -->
+    <!-- WebGL canvas -->
     <canvas id="glcanvas" width="800" height="600"></canvas>
-    <!-- UI Control Panel -->
+    <!-- Control Panel -->
     <div id="controlPanel">
+      <!-- Simulation control buttons -->
       <button id="toggleSim">Pause Simulation</button>
       <button id="resetSim">Reset Simulation</button>
       <button id="toggleRecord">Start Recording</button>
       <br><br>
+      <!-- Parameter sliders -->
       <label>Force Magnitude: <span id="forceDisplay">10.0</span></label><br>
       <input type="range" id="forceSlider" min="1" max="20" step="0.5" value="10">
       <br>
@@ -51,73 +52,142 @@
       <br>
       <label>Simulation Speed: <span id="speedDisplay">1.0</span></label><br>
       <input type="range" id="speedSlider" min="0.5" max="2" step="0.1" value="1.0">
+      <br><br>
+      <!-- New: Dropdown to select simulation configuration -->
+      <label>Pole Configuration: </label>
+      <select id="poleConfig">
+        <option value="1-pole">1 Pole</option>
+        <option value="2-pole">2 Poles</option>
+      </select>
       
+      <!-- Metrics overlay -->
       <div id="metrics"></div>
     </div>
     
     <script>
       /******************************************************
-       * Simulation and Reinforcement Learning Setup
+       * Global Simulation and RL Variables
        ******************************************************/
-      // Global physics parameters (adjustable via UI sliders)
+      // Adjustable physics parameters (via sliders)
       let gravity = 9.8;
       const massCart = 1.0;
-      const massPole = 0.1;
-      const totalMass = massCart + massPole;
-      let poleLength = 0.5;  // meters (half-length)
+      const massPole = 0.1;  
+      const totalMassSingle = massCart + massPole;
+      // For the double pole, we treat the poles as two units of massPole.
+      const totalMassDouble = massCart + 2 * massPole;
+      
+      let poleLength = 0.5;  // half-length (meters)
       let forceMag = 10.0;
       const baseTau = 0.02;  // base simulation time step (seconds)
-      let simulationSpeed = 1.0;  // simulation speed multiplier
+      let simulationSpeed = 1.0;  // multiplier
       
-      // State variables: cart position and velocity, pole angle and angular velocity
-      let x = 0, x_dot = 0, theta = 0.05, theta_dot = 0;
-      const scaleFactor = 100;   // meters-to-pixels conversion factor
-      const offsetY = 100;       // vertical offset in pixels
+      // Common cart variables
+      let x = 0, x_dot = 0;
       
-      // Trajectory storage (for pole tip)
+      // Single-pole variables
+      let theta = 0.05, theta_dot = 0;
+      
+      // For double-pole mode, we use two angles:
+      let theta1 = 0.05, theta1_dot = 0;
+      let theta2 = 0.05, theta2_dot = 0;
+      
+      // Scale and offset for rendering (pixels)
+      const scaleFactor = 100;
+      const offsetY = 100;
+      
+      // Trajectory for the tip (for drawing history)
       let trajectory = [];
       
-      // Reinforcement learning data storage
+      // Reinforcement learning and training storage
       let states = [];
       let actions = [];
       let rewards = [];
       let episodeReward = 0, episodeCount = 0;
       
-      // Build a simple policy network using TensorFlow.js
-      const model = tf.sequential();
-      model.add(tf.layers.dense({ inputShape: [4], units: 24, activation: 'relu' }));
-      model.add(tf.layers.dense({ units: 24, activation: 'relu' }));
-      // Two outputs: probability of moving left (-1) vs. right (+1)
-      model.add(tf.layers.dense({ units: 2, activation: 'softmax' }));
-      const optimizer = tf.train.adam(0.01);
+      // Simulation Mode: "1-pole" or "2-pole" (default 1-pole)
+      let simulationType = "1-pole";
       
-      // Given the current state, pick an action by sampling from the model's probabilities.
+      // TensorFlow.js model – will be (re)created based on simulationType.
+      let model, optimizer;
+      
+      // Initialize the neural network model based on simulationType:
+      function setupModel() {
+        if (model) { model.dispose(); }  // Dispose of any existing model
+        if (simulationType === "1-pole") {
+          model = tf.sequential();
+          model.add(tf.layers.dense({ inputShape: [4], units: 24, activation: 'relu' }));
+          model.add(tf.layers.dense({ units: 24, activation: 'relu' }));
+          model.add(tf.layers.dense({ units: 2, activation: 'softmax' }));
+        } else if (simulationType === "2-pole") {
+          model = tf.sequential();
+          model.add(tf.layers.dense({ inputShape: [6], units: 30, activation: 'relu' }));
+          model.add(tf.layers.dense({ units: 30, activation: 'relu' }));
+          model.add(tf.layers.dense({ units: 2, activation: 'softmax' }));
+        }
+        optimizer = tf.train.adam(0.01);
+      }
+      
+      setupModel();
+      
+      // Choose an action based on current state. For single pole, state has 4 elements;
+      // for double, 6 elements.
       function chooseAction(state) {
         return tf.tidy(() => {
           const logits = model.predict(tf.tensor2d([state]));
-          const probs = logits.dataSync();  // [probLeft, probRight]
+          const probs = logits.dataSync();
           const rand = Math.random();
+          // Action: -1 for left, +1 for right.
           return (rand < probs[0]) ? -1 : 1;
         });
       }
       
-      // Update the simulation state (Euler integration) using a time step dt.
-      function simulateStep(action, dt) {
+      /******************************************************
+       * Simulation Step Functions
+       ******************************************************/
+      // Single-pole simulation using cart-pole dynamics.
+      function simulateSingleStep(action, dt) {
         const force = action * forceMag;
         const costheta = Math.cos(theta);
         const sintheta = Math.sin(theta);
-        const temp = (force + massPole * poleLength * theta_dot * theta_dot * sintheta) / totalMass;
+        const temp = (force + massPole * poleLength * theta_dot * theta_dot * sintheta) / totalMassSingle;
         const theta_acc = (gravity * sintheta - costheta * temp) /
-                          (poleLength * (4.0/3.0 - massPole * costheta * costheta / totalMass));
-        const x_acc = temp - massPole * poleLength * theta_acc * costheta / totalMass;
+                          (poleLength * (4.0/3.0 - (massPole * costheta * costheta) / totalMassSingle));
+        const x_acc = temp - (massPole * poleLength * theta_acc * costheta) / totalMassSingle;
         x += dt * x_dot;
         x_dot += dt * x_acc;
         theta += dt * theta_dot;
         theta_dot += dt * theta_acc;
       }
       
-      // Train the policy network using a policy gradient method.
+      // Double-pole simulation (simplified/demonstrative).
+      // The first pole (theta1) affects the cart; the second pole (theta2) is attached to the tip of the first.
+      function simulateDoubleStep(action, dt) {
+        const force = action * forceMag;
+        // Effective mass for the first pole includes both poles:
+        let m_eff = 2 * massPole;
+        let costheta1 = Math.cos(theta1);
+        let sintheta1 = Math.sin(theta1);
+        let temp = (force + m_eff * poleLength * theta1_dot * theta1_dot * sintheta1) / (massCart + m_eff);
+        let theta1_acc = (gravity * sintheta1 - costheta1 * temp) /
+                         (poleLength * (4.0/3.0 - (m_eff * costheta1 * costheta1) / (massCart + m_eff)));
+        let x_acc = temp - (m_eff * poleLength * theta1_acc * costheta1) / (massCart + m_eff);
+        // A simplified dynamic for the second pole: it acts as a pendulum attached at the tip of the first.
+        // (Note: This is an approximation solely for demonstration.)
+        let theta2_acc = (gravity * Math.sin(theta2) - 0.2 * theta2_dot);
+        
+        x += dt * x_dot;
+        x_dot += dt * x_acc;
+        theta1 += dt * theta1_dot;
+        theta1_dot += dt * theta1_acc;
+        theta2 += dt * theta2_dot;
+        theta2_dot += dt * theta2_acc;
+      }
+      
+      /******************************************************
+       * Training Function (Policy Gradient)
+       ******************************************************/
       function trainModel() {
+        // Compute discounted rewards.
         const discountedRewards = [];
         let sum = 0;
         const gamma = 0.99;
@@ -150,7 +220,6 @@
       let canvas, gl, program, positionBuffer;
       let resolutionUniformLocation, colorUniformLocation, positionAttribLocation;
       
-      // Initialize WebGL, compile shaders, and set uniforms.
       function initGL() {
         canvas = document.getElementById("glcanvas");
         gl = canvas.getContext("webgl");
@@ -158,7 +227,6 @@
           alert("WebGL not supported");
           return;
         }
-        // Vertex shader: converts pixel positions to clip space.
         const vsSource = `
           attribute vec2 a_position;
           uniform vec2 u_resolution;
@@ -169,7 +237,6 @@
             gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
           }
         `;
-        // Fragment shader: outputs a solid color.
         const fsSource = `
           precision mediump float;
           uniform vec4 u_color;
@@ -186,7 +253,6 @@
         positionBuffer = gl.createBuffer();
       }
       
-      // Compile a shader.
       function createShader(gl, type, source) {
         const shader = gl.createShader(type);
         gl.shaderSource(shader, source);
@@ -197,7 +263,6 @@
         gl.deleteShader(shader);
       }
       
-      // Link shaders into a WebGL program.
       function createProgram(gl, vertexShader, fragmentShader) {
         const program = gl.createProgram();
         gl.attachShader(program, vertexShader);
@@ -209,21 +274,12 @@
         gl.deleteProgram(program);
       }
       
-      // Build vertices for a rectangle (two triangles).
       function setRectangle(x, y, width, height) {
         const x1 = x, y1 = y;
         const x2 = x + width, y2 = y + height;
-        return new Float32Array([
-          x1, y1,
-          x2, y1,
-          x1, y2,
-          x1, y2,
-          x2, y1,
-          x2, y2,
-        ]);
+        return new Float32Array([ x1, y1, x2, y1, x1, y2, x1, y2, x2, y1, x2, y2 ]);
       }
       
-      // Generic function to draw a set of vertices.
       function drawShape(vertices, color, mode) {
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
@@ -233,73 +289,94 @@
         gl.drawArrays(mode, 0, vertices.length / 2);
       }
       
-      // Draw a line (or connected line strip) from an array of points.
       function drawLine(points, color, mode = gl.LINE_STRIP) {
         const vertices = new Float32Array(points);
         drawShape(vertices, color, mode);
       }
       
-      // Draw a filled rectangle.
       function drawRect(x, y, width, height, color) {
         const vertices = setRectangle(x, y, width, height);
         drawShape(vertices, color, gl.TRIANGLES);
       }
       
-      // Render the cart-pole scene (ground, cart, pole, and tip trajectory).
+      /******************************************************
+       * Rendering the Scene
+       ******************************************************/
       function renderScene() {
         gl.viewport(0, 0, canvas.width, canvas.height);
         gl.clearColor(0.9, 0.9, 0.9, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
         gl.useProgram(program);
         gl.uniform2f(resolutionUniformLocation, canvas.width, canvas.height);
-        
-        // Draw ground as a horizontal line.
+        // Draw the ground.
         const groundY = canvas.height / 2 + offsetY;
         drawLine([0, groundY, canvas.width, groundY], [0.4, 0.4, 0.4, 1], gl.LINES);
         
-        // Compute cart position.
+        // Determine cart position.
         const cartX = canvas.width / 2 + (x * scaleFactor);
         const cartY = canvas.height / 2 + offsetY;
-        // Draw cart as a rectangle.
+        // Draw the cart.
         drawRect(cartX - 25, cartY - 10, 50, 20, [0, 0, 0, 1]);
-        
-        // Compute pole tip position.
         const L = poleLength * scaleFactor;
-        const tipX = cartX + Math.sin(theta) * L;
-        const tipY = cartY - Math.cos(theta) * L;
-        // Draw the pole (a red line).
-        drawLine([cartX, cartY, tipX, tipY], [1, 0, 0, 1], gl.LINES);
         
-        // Draw the tip's trajectory as a blue line strip.
+        if (simulationType === "1-pole") {
+          // Single-Pole: compute tip using theta.
+          const tipX = cartX + Math.sin(theta) * L;
+          const tipY = cartY - Math.cos(theta) * L;
+          // Draw pole.
+          drawLine([cartX, cartY, tipX, tipY], [1, 0, 0, 1], gl.LINES);
+          // Update trajectory.
+          trajectory.push({ x: tipX, y: tipY });
+        } else if (simulationType === "2-pole") {
+          // Double-Pole: first pole.
+          const tip1X = cartX + Math.sin(theta1) * L;
+          const tip1Y = cartY - Math.cos(theta1) * L;
+          drawLine([cartX, cartY, tip1X, tip1Y], [1, 0, 0, 1], gl.LINES);
+          // Second pole: relative to first.
+          const tip2X = tip1X + Math.sin(theta1 + theta2) * L;
+          const tip2Y = tip1Y - Math.cos(theta1 + theta2) * L;
+          drawLine([tip1X, tip1Y, tip2X, tip2Y], [0, 0.5, 0, 1], gl.LINES);
+          // Update trajectory to track the tip of the second pole.
+          trajectory.push({ x: tip2X, y: tip2Y });
+        }
+        
+        // Limit stored trajectory points.
+        if (trajectory.length > 500) trajectory.shift();
+        // Draw trajectory.
         if (trajectory.length > 1) {
-          let trajPts = [];
-          for (let pt of trajectory) {
-            trajPts.push(pt.x, pt.y);
-          }
-          drawLine(trajPts, [0, 0, 1, 0.6], gl.LINE_STRIP);
+          let pts = [];
+          for (let pt of trajectory) { pts.push(pt.x, pt.y); }
+          drawLine(pts, [0, 0, 1, 0.6], gl.LINE_STRIP);
         }
       }
       
-      // Record the current tip position.
-      function updateTrajectory() {
-        const cartX = canvas.width / 2 + (x * scaleFactor);
-        const cartY = canvas.height / 2 + offsetY;
-        const L = poleLength * scaleFactor;
-        const tipX = cartX + Math.sin(theta) * L;
-        const tipY = cartY - Math.cos(theta) * L;
-        trajectory.push({ x: tipX, y: tipY });
-        if (trajectory.length > 500) trajectory.shift();
-      }
-      
-      // Return true if the pole falls too far or the cart is off-screen.
+      /******************************************************
+       * Failure and Reset Functions
+       ******************************************************/
       function checkFailure() {
-        return (Math.abs(theta) > Math.PI / 2 ||
-                Math.abs(x * scaleFactor) > canvas.width / 2);
+        const outOfBounds = (Math.abs(x * scaleFactor) > canvas.width / 2);
+        if (simulationType === "1-pole") {
+          return (Math.abs(theta) > Math.PI / 2 || outOfBounds);
+        } else if (simulationType === "2-pole") {
+          // For double pole, declare failure if either pole deviates too far.
+          return (Math.abs(theta1) > Math.PI / 2 ||
+                  Math.abs(theta1 + theta2) > Math.PI / 2 ||
+                  outOfBounds);
+        }
       }
       
-      // Reset simulation state.
       function resetSimulation() {
-        x = 0; x_dot = 0; theta = 0.05; theta_dot = 0;
+        x = 0;
+        x_dot = 0;
+        if (simulationType === "1-pole") {
+          theta = 0.05;
+          theta_dot = 0;
+        } else if (simulationType === "2-pole") {
+          theta1 = 0.05;
+          theta1_dot = 0;
+          theta2 = 0.05;
+          theta2_dot = 0;
+        }
         trajectory = [];
       }
       
@@ -320,15 +397,14 @@
       const speedSlider = document.getElementById("speedSlider");
       const speedDisplay = document.getElementById("speedDisplay");
       const metricsDiv = document.getElementById("metrics");
+      const poleConfigSelect = document.getElementById("poleConfig");
       
       toggleSimBtn.addEventListener("click", () => {
         simRunning = !simRunning;
         toggleSimBtn.textContent = simRunning ? "Pause Simulation" : "Resume Simulation";
       });
       
-      resetSimBtn.addEventListener("click", () => {
-        resetSimulation();
-      });
+      resetSimBtn.addEventListener("click", resetSimulation);
       
       forceSlider.addEventListener("input", () => {
         forceMag = parseFloat(forceSlider.value);
@@ -345,7 +421,16 @@
         speedDisplay.textContent = simulationSpeed.toFixed(1);
       });
       
-      // Toggle recording using the MediaRecorder API.
+      poleConfigSelect.addEventListener("change", () => {
+        simulationType = poleConfigSelect.value;
+        resetSimulation();
+        states = [];
+        actions = [];
+        rewards = [];
+        episodeReward = 0;
+        setupModel();
+      });
+      
       toggleRecordBtn.addEventListener("click", () => {
         if (!recording) {
           startRecording();
@@ -358,18 +443,14 @@
       });
       
       function startRecording() {
-        let stream = canvas.captureStream(30);  // 30 fps
+        let stream = canvas.captureStream(30);  // 30 FPS
         mediaRecorder = new MediaRecorder(stream, { mimeType: "video/webm" });
-        mediaRecorder.ondataavailable = e => {
-          if (e.data.size > 0) recordedChunks.push(e.data);
-        };
+        mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
         mediaRecorder.onstop = saveRecording;
         mediaRecorder.start();
       }
       
-      function stopRecording() {
-        mediaRecorder.stop();
-      }
+      function stopRecording() { mediaRecorder.stop(); }
       
       function saveRecording() {
         let blob = new Blob(recordedChunks, { type: "video/webm" });
@@ -384,12 +465,24 @@
         window.URL.revokeObjectURL(url);
       }
       
-      // Update metrics (episode count, reward and state information) on the overlay.
+      // Update the metrics overlay.
       function updateMetrics() {
-        metricsDiv.innerHTML = `Episode: ${episodeCount}<br>
-          Episode Reward: ${episodeReward}<br>
-          x: ${x.toFixed(2)}, x_dot: ${x_dot.toFixed(2)}<br>
-          theta: ${theta.toFixed(2)}, theta_dot: ${theta_dot.toFixed(2)}`;
+        if (simulationType === "1-pole") {
+          metricsDiv.innerHTML = `
+            Episode: ${episodeCount}<br>
+            Episode Reward: ${episodeReward}<br>
+            x: ${x.toFixed(2)}, x_dot: ${x_dot.toFixed(2)}<br>
+            theta: ${theta.toFixed(2)}, theta_dot: ${theta_dot.toFixed(2)}
+          `;
+        } else if (simulationType === "2-pole") {
+          metricsDiv.innerHTML = `
+            Episode: ${episodeCount}<br>
+            Episode Reward: ${episodeReward}<br>
+            x: ${x.toFixed(2)}, x_dot: ${x_dot.toFixed(2)}<br>
+            theta1: ${theta1.toFixed(2)}, theta1_dot: ${theta1_dot.toFixed(2)}<br>
+            theta2: ${theta2.toFixed(2)}, theta2_dot: ${theta2_dot.toFixed(2)}
+          `;
+        }
       }
       
       /******************************************************
@@ -398,15 +491,26 @@
       function step() {
         if (simRunning) {
           const dt = baseTau * simulationSpeed;
-          const currentState = [x, x_dot, theta, theta_dot];
-          const action = chooseAction(currentState);
-          simulateStep(action, dt);
-          states.push(currentState);
-          actions.push(action === -1 ? 0 : 1);
-          const reward = (Math.abs(theta) < Math.PI / 6) ? 1 : 0;
-          rewards.push(reward);
-          episodeReward += reward;
-          updateTrajectory();
+          let currentState;
+          let action;
+          if (simulationType === "1-pole") {
+            currentState = [x, x_dot, theta, theta_dot];
+            action = chooseAction(currentState);
+            simulateSingleStep(action, dt);
+            // Store RL data.
+            states.push(currentState);
+            actions.push(action === -1 ? 0 : 1);
+            rewards.push(Math.abs(theta) < Math.PI / 6 ? 1 : 0);
+          } else if (simulationType === "2-pole") {
+            currentState = [x, x_dot, theta1, theta1_dot, theta2, theta2_dot];
+            action = chooseAction(currentState);
+            simulateDoubleStep(action, dt);
+            states.push(currentState);
+            actions.push(action === -1 ? 0 : 1);
+            // Reward only if both poles are near vertical.
+            rewards.push((Math.abs(theta1) < Math.PI / 6 && Math.abs(theta1 + theta2) < Math.PI / 6) ? 1 : 0);
+          }
+          episodeReward += rewards[rewards.length - 1];
           
           if (checkFailure()) {
             episodeCount++;
@@ -428,6 +532,7 @@
        * Initialization and Start
        ******************************************************/
       initGL();
+      resetSimulation();
       requestAnimationFrame(step);
     </script>
   </body>
