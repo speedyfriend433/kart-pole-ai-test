@@ -512,15 +512,14 @@ function trainActorCriticModel() {
         speedDisplay.textContent = simulationSpeed.toFixed(1);
       });
       
-      poleConfigSelect.addEventListener("change", () => {
-        simulationType = poleConfigSelect.value;
-        resetSimulation();
-        states = [];
-        actions = [];
-        rewards = [];
-        episodeReward = 0;
-        setupModel();
-      });
+      poleConfigSelect.addEventListener("change", () => {     
+        simulationType = poleConfigSelect.value;     
+        resetSimulation();     
+        states = [];     
+        actions = [];     
+        rewards = [];     
+        episodeReward = 0;     
+        setupActorCriticModels(); // Rebuilds the networks with shape = 4 (1‑pole) OR 6 (2‑pole)   });
       
       toggleRecordBtn.addEventListener("click", () => {
         if (!recording) {
